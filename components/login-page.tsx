@@ -63,6 +63,7 @@ export function LoginPage() {
       const { success, error } = await login(loginEmail, loginPassword)
 
       if (!success) {
+        console.error("Erro no login:", error)
         toast({
           title: "Erro de login",
           description: error || "Email ou senha incorretos",

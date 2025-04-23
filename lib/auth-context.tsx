@@ -68,6 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Função para buscar e definir o perfil do usuário - otimizada com cache
   const fetchAndSetUserProfile = useCallback(async (userId: string) => {
     try {
+      console.log("Buscando perfil para usuário ID:", userId)
+
       // Verificar cache primeiro
       const cacheKey = `user_profile_${userId}`
       const cachedProfile = cache.get<AuthUser>(cacheKey)
@@ -79,11 +81,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       // Se não estiver em cache, buscar do banco
+      console.log("Buscando perfil do banco de dados")
       const { data: profile, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle()
 
       if (error) {
         console.error("Erro ao buscar perfil:", error)
         // Fallback para dados básicos
+        console.log("Tentando fallback para dados básicos do usuário")
         const { data: userData } = await supabase.auth.getUser()
         if (userData?.user) {
           const basicUser = {
@@ -92,6 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             email: userData.user.email || "",
           }
 
+          console.log("Usando dados básicos do usuário:", basicUser.name)
           setUser(basicUser)
           // Armazenar em cache
           cache.set(cacheKey, basicUser, 30 * 60 * 1000) // 30 minutos
@@ -100,6 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (profile) {
+        console.log("Perfil encontrado:", profile.name)
         const userProfile = {
           id: profile.id,
           name: profile.name || "Usuário",
@@ -112,6 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         cache.set(cacheKey, userProfile, 30 * 60 * 1000) // 30 minutos
       } else {
         // Criar perfil se não existir
+        console.log("Perfil não encontrado, criando novo perfil")
         const { data: userData } = await supabase.auth.getUser()
         if (userData?.user) {
           const name = userData.user.user_metadata?.name || "Usuário"
@@ -129,6 +136,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             email: email,
           }
 
+          console.log("Novo perfil criado:", name)
           setUser(newUser)
           // Armazenar em cache
           cache.set(cacheKey, newUser, 30 * 60 * 1000) // 30 minutos
@@ -306,32 +314,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Função de login otimizada
   const login = async (email: string, password: string) => {
     try {
+      console.log("Iniciando processo de login para:", email)
+
       if (!email || !password) {
+        console.error("Email ou senha vazios")
         return { success: false, error: "Email e senha são obrigatórios" }
       }
 
       const trimmedEmail = email.trim()
+      console.log("Email após trim:", trimmedEmail)
 
       // Login com Supabase - sem operações bloqueantes extras
+      console.log("Chamando Supabase auth.signInWithPassword")
       const { data, error } = await supabase.auth.signInWithPassword({
         email: trimmedEmail,
         password,
       })
 
       if (error) {
-        console.error("Erro no login:", error.message)
+        console.error("Erro no login Supabase:", error.message)
         if (error.message.includes("Invalid login credentials")) {
           return { success: false, error: "Email ou senha incorretos" }
         }
         return { success: false, error: error.message }
       }
 
+      console.log("Resposta do Supabase:", data ? "Dados recebidos" : "Sem dados")
+
       if (!data.user || !data.session) {
+        console.error("Sem usuário ou sessão nos dados retornados")
         return { success: false, error: "Erro ao obter dados do usuário" }
       }
 
+      console.log("Login bem-sucedido para usuário ID:", data.user.id)
+
       // Armazenar ID em cache
       cache.set("currentUserId", data.user.id, 30 * 60 * 1000)
+      console.log("ID do usuário armazenado em cache")
 
       return { success: true }
     } catch (error) {

@@ -1,10 +1,18 @@
 import { createClient } from "@supabase/supabase-js"
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string
+// Verificar se as variáveis de ambiente estão definidas
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.error("Variáveis de ambiente do Supabase não definidas:", {
+    url: supabaseUrl ? "definido" : "não definido",
+    key: supabaseAnonKey ? "definido" : "não definido",
+  })
+}
 
 // Configuração otimizada para balancear persistência e performance
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = createClient(supabaseUrl || "", supabaseAnonKey || "", {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
@@ -24,6 +32,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     },
   },
 })
+
+console.log("Cliente Supabase inicializado com URL:", supabaseUrl)
 
 // Função simplificada para verificar a sessão periodicamente
 // sem causar sobrecarga de requisições
