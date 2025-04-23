@@ -2,6 +2,8 @@
 
 import { createContext, useContext, useState, useEffect, type ReactNode, useRef, useCallback } from "react"
 import { supabase } from "./supabaseClient"
+import { useRouter } from "next/navigation"
+import { cache } from "./cache"
 
 type AuthUser = {
   id: string
@@ -22,243 +24,295 @@ type AuthContextType = {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
-// Adicione esta função no início do arquivo, antes do AuthProvider
-const REFRESH_TOKEN_INTERVAL = 1000 * 60 * 30 // 30 minutos
+// Função para configurar o heartbeat da sessão - otimizada
+function setupSessionHeartbeat(intervalMinutes = 30) {
+  if (typeof window === "undefined") return () => {}
 
-// Modifique o AuthProvider para incluir um sistema de refresh token automático
+  // Usar um intervalo maior para reduzir chamadas à API
+  const heartbeatInterval = setInterval(
+    async () => {
+      try {
+        // Verificar se há uma sessão antes de tentar atualizar
+        const cachedUserId = cache.get<string>("currentUserId")
+        if (cachedUserId) {
+          // Se temos um ID de usuário em cache, a sessão provavelmente está ativa
+          // Não precisamos fazer nada
+          return
+        }
+
+        // Se não temos ID em cache, verificar sessão
+        const { data } = await supabase.auth.getSession()
+        if (data?.session) {
+          // Armazenar ID do usuário em cache
+          cache.set("currentUserId", data.session.user.id, 30 * 60 * 1000)
+        }
+      } catch (e) {
+        console.error("Erro no heartbeat da sessão:", e)
+      }
+    },
+    intervalMinutes * 60 * 1000,
+  )
+
+  return () => clearInterval(heartbeatInterval)
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [isLoading, setIsLoading] = useState(true)
-  const refreshTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const router = useRouter()
+  const initialLoadDoneRef = useRef(false)
+  const visibilityCheckedRef = useRef(false)
+  const visibilityTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const isMountedRef = useRef(true)
 
-  // Modifique a função setupRefreshTimer para ser mais robusta
-  const setupRefreshTimer = useCallback(() => {
-    // Limpar qualquer timer existente
-    if (refreshTimerRef.current) {
-      clearInterval(refreshTimerRef.current)
-    }
+  // Função para buscar e definir o perfil do usuário - otimizada com cache
+  const fetchAndSetUserProfile = useCallback(async (userId: string) => {
+    try {
+      // Verificar cache primeiro
+      const cacheKey = `user_profile_${userId}`
+      const cachedProfile = cache.get<AuthUser>(cacheKey)
 
-    // Configurar novo timer para refresh periódico do token
-    // Reduzindo o intervalo para 15 minutos para ser mais seguro
-    refreshTimerRef.current = setInterval(
-      async () => {
-        console.log("Executando refresh automático do token...")
-        try {
-          const { data, error } = await supabase.auth.refreshSession()
-
-          if (error) {
-            console.error("Erro no refresh automático:", error)
-            // Tentar novamente uma vez antes de desistir
-            const retryResult = await supabase.auth.refreshSession()
-            if (retryResult.error) {
-              console.error("Falha na segunda tentativa de refresh:", retryResult.error)
-              clearInterval(refreshTimerRef.current!)
-              refreshTimerRef.current = null
-              setUser(null) // Limpar o usuário se não conseguir renovar a sessão
-            } else {
-              console.log("Token atualizado com sucesso na segunda tentativa")
-            }
-          } else if (!data.session) {
-            console.log("Sessão expirada durante refresh automático")
-            clearInterval(refreshTimerRef.current!)
-            refreshTimerRef.current = null
-            setUser(null)
-          } else {
-            console.log("Token atualizado com sucesso via refresh automático")
-          }
-        } catch (error) {
-          console.error("Erro no refresh automático:", error)
-        }
-      },
-      1000 * 60 * 15,
-    ) // 15 minutos
-
-    return () => {
-      if (refreshTimerRef.current) {
-        clearInterval(refreshTimerRef.current)
-        refreshTimerRef.current = null
+      if (cachedProfile) {
+        console.log("Usando perfil de usuário do cache")
+        setUser(cachedProfile)
+        return
       }
+
+      // Se não estiver em cache, buscar do banco
+      const { data: profile, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle()
+
+      if (error) {
+        console.error("Erro ao buscar perfil:", error)
+        // Fallback para dados básicos
+        const { data: userData } = await supabase.auth.getUser()
+        if (userData?.user) {
+          const basicUser = {
+            id: userId,
+            name: userData.user.user_metadata?.name || "Usuário",
+            email: userData.user.email || "",
+          }
+
+          setUser(basicUser)
+          // Armazenar em cache
+          cache.set(cacheKey, basicUser, 30 * 60 * 1000) // 30 minutos
+        }
+        return
+      }
+
+      if (profile) {
+        const userProfile = {
+          id: profile.id,
+          name: profile.name || "Usuário",
+          email: profile.email || "",
+          profileImage: profile.profile_image,
+        }
+
+        setUser(userProfile)
+        // Armazenar em cache
+        cache.set(cacheKey, userProfile, 30 * 60 * 1000) // 30 minutos
+      } else {
+        // Criar perfil se não existir
+        const { data: userData } = await supabase.auth.getUser()
+        if (userData?.user) {
+          const name = userData.user.user_metadata?.name || "Usuário"
+          const email = userData.user.email || ""
+
+          await supabase.from("profiles").insert({
+            id: userId,
+            name: name,
+            email: email,
+          })
+
+          const newUser = {
+            id: userId,
+            name: name,
+            email: email,
+          }
+
+          setUser(newUser)
+          // Armazenar em cache
+          cache.set(cacheKey, newUser, 30 * 60 * 1000) // 30 minutos
+        }
+      }
+    } catch (error) {
+      console.error("Erro ao processar perfil:", error)
     }
   }, [])
 
-  // Carrega o usuário do Supabase Auth na renderização inicial
+  // Função de refresh de sessão simplificada e não-bloqueante
+  const refreshSession = useCallback(async () => {
+    try {
+      // Verificar cache primeiro
+      const cachedUserId = cache.get<string>("currentUserId")
+      if (cachedUserId) {
+        // Se temos um ID em cache, a sessão está ativa
+        // Só atualiza o usuário se não existir
+        if (!user) {
+          await fetchAndSetUserProfile(cachedUserId)
+        }
+        return true
+      }
+
+      // Se não temos ID em cache, tentar refresh
+      const { data, error } = await supabase.auth.refreshSession()
+
+      if (!error && data?.session) {
+        // Armazenar ID em cache
+        cache.set("currentUserId", data.session.user.id, 30 * 60 * 1000)
+
+        // Só atualiza o usuário se não existir
+        if (!user && data.session.user) {
+          await fetchAndSetUserProfile(data.session.user.id)
+        }
+        return true
+      }
+
+      return false
+    } catch (error) {
+      console.error("Erro ao atualizar sessão:", error)
+      return false
+    }
+  }, [fetchAndSetUserProfile, user])
+
+  // Definir handleVisibilityChange no nível superior do componente
+  const handleVisibilityChange = useCallback(() => {
+    // Evitar múltiplas chamadas em sequência
+    if (visibilityTimeoutRef.current) {
+      clearTimeout(visibilityTimeoutRef.current)
+    }
+
+    // Só verificar quando a página fica visível
+    if (document.visibilityState === "visible" && !visibilityCheckedRef.current) {
+      visibilityCheckedRef.current = true
+
+      // Usar timeout para debounce
+      visibilityTimeoutRef.current = setTimeout(async () => {
+        // Só verificar se temos um usuário
+        if (user) {
+          await refreshSession()
+        }
+        visibilityCheckedRef.current = false
+      }, 1000)
+    }
+  }, [refreshSession, user])
+
+  // Carrega o usuário na inicialização - otimizado
   useEffect(() => {
+    // Marcar componente como montado
+    isMountedRef.current = true
+
+    // Evitar múltiplas cargas
+    if (initialLoadDoneRef.current) return
+
     async function loadUser() {
       try {
         setIsLoading(true)
-        console.log("Verificando sessão existente...")
 
-        // Verifica se há uma sessão ativa
-        const {
-          data: { session },
-        } = await supabase.auth.getSession()
+        // Verificar cache primeiro
+        const cachedUserId = cache.get<string>("currentUserId")
+        if (cachedUserId) {
+          console.log("Usando ID de usuário do cache")
+          await fetchAndSetUserProfile(cachedUserId)
+          if (isMountedRef.current) {
+            setIsLoading(false)
+            initialLoadDoneRef.current = true
+          }
+          return
+        }
 
-        if (session?.user) {
-          console.log("Sessão encontrada, carregando perfil do usuário...")
-          await fetchAndSetUserProfile(session.user.id)
+        // Se não estiver em cache, verificar sessão
+        const { data } = await supabase.auth.getSession()
 
-          // Configurar refresh automático quando temos uma sessão válida
-          setupRefreshTimer()
+        if (data?.session?.user) {
+          // Armazenar ID em cache
+          cache.set("currentUserId", data.session.user.id, 30 * 60 * 1000)
+
+          // Carregar perfil
+          await fetchAndSetUserProfile(data.session.user.id)
         } else {
-          console.log("Nenhuma sessão encontrada")
-          setUser(null)
+          if (isMountedRef.current) {
+            setUser(null)
+          }
         }
       } catch (error) {
         console.error("Erro ao carregar usuário:", error)
-        setUser(null)
+        if (isMountedRef.current) {
+          setUser(null)
+        }
       } finally {
-        setIsLoading(false)
+        if (isMountedRef.current) {
+          setIsLoading(false)
+          initialLoadDoneRef.current = true
+        }
       }
     }
 
-    // Configura o listener para mudanças de autenticação
+    // Configurar listener de autenticação - apenas uma vez
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       console.log("Auth state changed:", event)
 
       if (event === "SIGNED_IN" && session) {
+        // Armazenar ID em cache
+        cache.set("currentUserId", session.user.id, 30 * 60 * 1000)
+
         await fetchAndSetUserProfile(session.user.id)
-        setupRefreshTimer()
       } else if (event === "SIGNED_OUT") {
-        setUser(null)
-        if (refreshTimerRef.current) {
-          clearInterval(refreshTimerRef.current)
-          refreshTimerRef.current = null
+        // Limpar cache
+        cache.clear("currentUserId")
+
+        if (isMountedRef.current) {
+          setUser(null)
         }
       } else if (event === "TOKEN_REFRESHED" && session) {
-        // Atualiza o usuário quando o token é atualizado
-        await fetchAndSetUserProfile(session.user.id)
+        // Atualizar cache
+        cache.set("currentUserId", session.user.id, 30 * 60 * 1000)
+
+        // Só atualiza o usuário se não existir ainda
+        if (!user && session.user && isMountedRef.current) {
+          await fetchAndSetUserProfile(session.user.id)
+        }
       }
     })
 
+    // Iniciar carregamento sem bloquear a renderização
     loadUser()
 
-    // Limpa o listener e o timer quando o componente é desmontado
+    // Configurar heartbeat leve - apenas uma vez
+    const cleanupHeartbeat = setupSessionHeartbeat(30) // A cada 30 minutos
+
     return () => {
+      // Marcar componente como desmontado
+      isMountedRef.current = false
+
       subscription.unsubscribe()
-      if (refreshTimerRef.current) {
-        clearInterval(refreshTimerRef.current)
-        refreshTimerRef.current = null
+      if (cleanupHeartbeat) cleanupHeartbeat()
+    }
+  }, [fetchAndSetUserProfile]) // Remover user para evitar loops
+
+  // Verificação de visibilidade simplificada
+  useEffect(() => {
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+      if (visibilityTimeoutRef.current) {
+        clearTimeout(visibilityTimeoutRef.current)
       }
     }
-  }, [setupRefreshTimer])
+  }, [handleVisibilityChange])
 
-  // Função auxiliar para buscar e definir o perfil do usuário
-  const fetchAndSetUserProfile = async (userId: string) => {
-    try {
-      // Busca o perfil do usuário usando maybeSingle() em vez de single()
-      // maybeSingle() retorna null se não encontrar, em vez de lançar um erro
-      const { data: profile, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle()
-
-      if (error) {
-        console.error("Erro ao buscar perfil:", error)
-        // Busca informações básicas do usuário se houver erro ao buscar o perfil
-        await fallbackToUserData(userId)
-        return
-      }
-
-      if (profile) {
-        setUser({
-          id: profile.id,
-          name: profile.name || "Usuário",
-          email: profile.email || "",
-          profileImage: profile.profile_image,
-        })
-        console.log("Perfil do usuário carregado com sucesso")
-      } else {
-        console.log("Perfil não encontrado, tentando criar um novo")
-        // Se não encontrou perfil, tenta criar um novo perfil
-        await createUserProfile(userId)
-      }
-    } catch (error) {
-      console.error("Erro ao buscar perfil do usuário:", error)
-      // Em caso de erro, tenta usar os dados básicos do usuário
-      await fallbackToUserData(userId)
-    }
-  }
-
-  // Função para criar um novo perfil de usuário se não existir
-  const createUserProfile = async (userId: string) => {
-    try {
-      // Busca informações básicas do usuário
-      const { data: userData, error: userError } = await supabase.auth.getUser()
-
-      if (userError || !userData?.user) {
-        console.error("Erro ao buscar dados do usuário:", userError)
-        return
-      }
-
-      const user = userData.user
-      const name = user.user_metadata?.name || "Usuário"
-      const email = user.email || ""
-
-      // Tenta inserir um novo perfil
-      const { error: insertError } = await supabase.from("profiles").insert({
-        id: userId,
-        name: name,
-        email: email,
-      })
-
-      if (insertError) {
-        console.error("Erro ao criar perfil:", insertError)
-        // Se não conseguir criar o perfil, usa os dados básicos
-        setUser({
-          id: userId,
-          name: name,
-          email: email,
-        })
-        return
-      }
-
-      // Se criou com sucesso, define o usuário
-      setUser({
-        id: userId,
-        name: name,
-        email: email,
-      })
-      console.log("Novo perfil de usuário criado com sucesso")
-    } catch (error) {
-      console.error("Erro ao criar perfil de usuário:", error)
-      await fallbackToUserData(userId)
-    }
-  }
-
-  // Função para usar dados básicos do usuário quando não conseguir buscar o perfil
-  const fallbackToUserData = async (userId: string) => {
-    try {
-      const { data: userData } = await supabase.auth.getUser()
-
-      if (userData?.user) {
-        setUser({
-          id: userId,
-          name: userData.user.user_metadata?.name || "Usuário",
-          email: userData.user.email || "",
-        })
-        console.log("Usando dados básicos do usuário como fallback")
-      } else {
-        console.log("Nenhum dado de usuário disponível para fallback")
-        setUser(null)
-      }
-    } catch (error) {
-      console.error("Erro ao buscar dados básicos do usuário:", error)
-      setUser(null)
-    }
-  }
-
+  // Função de login otimizada
   const login = async (email: string, password: string) => {
     try {
-      console.log("Tentando fazer login com email:", email)
-
-      // Validar entrada
       if (!email || !password) {
         return { success: false, error: "Email e senha são obrigatórios" }
       }
 
-      // Limpar espaços em branco
       const trimmedEmail = email.trim()
 
-      // Fazer login com Supabase
+      // Login com Supabase - sem operações bloqueantes extras
       const { data, error } = await supabase.auth.signInWithPassword({
         email: trimmedEmail,
         password,
@@ -266,21 +320,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (error) {
         console.error("Erro no login:", error.message)
-
-        // Mensagens de erro mais amigáveis
         if (error.message.includes("Invalid login credentials")) {
           return { success: false, error: "Email ou senha incorretos" }
         }
-
         return { success: false, error: error.message }
       }
 
       if (!data.user || !data.session) {
-        console.error("Login bem-sucedido, mas sem dados de usuário ou sessão")
         return { success: false, error: "Erro ao obter dados do usuário" }
       }
 
-      console.log("Login bem-sucedido para:", data.user.email)
+      // Armazenar ID em cache
+      cache.set("currentUserId", data.user.id, 30 * 60 * 1000)
+
       return { success: true }
     } catch (error) {
       console.error("Exceção ao fazer login:", error)
@@ -288,11 +340,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // Função de registro - sem alterações
   const register = async (name: string, email: string, password: string) => {
     try {
-      console.log("Tentando registrar novo usuário...")
-      // Registra o usuário no Supabase Auth
-      // O perfil será criado automaticamente pelo trigger que configuramos
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
@@ -308,7 +358,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { success: false, error: error.message }
       }
 
-      console.log("Registro bem-sucedido")
       return { success: true }
     } catch (error) {
       console.error("Erro ao registrar:", error)
@@ -316,28 +365,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // Função de logout - otimizada
   const logout = async () => {
     try {
-      console.log("Fazendo logout...")
       await supabase.auth.signOut()
-      setUser(null)
-      console.log("Logout bem-sucedido")
-      // Redirecionar para a página inicial acontecerá automaticamente
-      // devido ao useEffect nos componentes protegidos
+
+      // Limpar cache
+      cache.clear("currentUserId")
+
+      if (isMountedRef.current) {
+        setUser(null)
+      }
     } catch (error) {
       console.error("Erro ao fazer logout:", error)
     }
   }
 
+  // Função de atualização de usuário - otimizada com cache
   const updateUser = async (userData: Partial<AuthUser>) => {
     try {
       if (!user) {
-        console.error("Tentativa de atualizar usuário sem estar autenticado")
         return { success: false, error: "Usuário não autenticado" }
       }
 
-      console.log("Atualizando perfil do usuário...")
-      // Atualiza o perfil na tabela profiles
       const { error } = await supabase
         .from("profiles")
         .update({
@@ -351,13 +401,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { success: false, error: error.message }
       }
 
-      // Atualiza o estado local
-      setUser({
+      const updatedUser = {
         ...user,
         ...userData,
-      })
+      }
 
-      console.log("Perfil atualizado com sucesso")
+      if (isMountedRef.current) {
+        setUser(updatedUser)
+      }
+
+      // Atualizar cache
+      const cacheKey = `user_profile_${user.id}`
+      cache.set(cacheKey, updatedUser, 30 * 60 * 1000)
+
       return { success: true }
     } catch (error) {
       console.error("Erro ao atualizar usuário:", error)
@@ -365,105 +421,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  // Modifique a função refreshSession para ser mais robusta
-  const refreshSession = async () => {
-    try {
-      console.log("Tentando atualizar sessão...")
-
-      // Primeiro, verifica se existe uma sessão ativa
-      const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
-
-      if (sessionError) {
-        console.error("Erro ao verificar sessão:", sessionError)
-        return false
-      }
-
-      // Se não houver sessão, tenta recuperar de cookies ou localStorage
-      if (!sessionData.session) {
-        console.log("Nenhuma sessão ativa para atualizar, tentando recuperar...")
-
-        // Tenta forçar uma reconexão com o Supabase
-        try {
-          // Tenta reconectar usando o token armazenado
-          const { data: reconnectData, error: reconnectError } = await supabase.auth.refreshSession()
-
-          if (reconnectError || !reconnectData.session) {
-            console.log("Falha ao reconectar:", reconnectError)
-            setUser(null)
-            return false
-          }
-
-          console.log("Reconexão bem-sucedida")
-          await fetchAndSetUserProfile(reconnectData.session.user.id)
-          setupRefreshTimer() // Reinicia o timer após reconexão
-          return true
-        } catch (reconnectError) {
-          console.error("Erro ao tentar reconectar:", reconnectError)
-          setUser(null)
-          return false
-        }
-      }
-
-      // Se houver sessão, tenta atualizá-la
-      const { data, error } = await supabase.auth.refreshSession()
-
-      if (error) {
-        console.error("Erro ao atualizar sessão:", error)
-
-        // Tenta uma segunda vez antes de desistir
-        const retryResult = await supabase.auth.refreshSession()
-        if (retryResult.error) {
-          console.error("Falha na segunda tentativa de atualizar sessão:", retryResult.error)
-          setUser(null)
-          return false
-        } else if (retryResult.data.session) {
-          console.log("Sessão atualizada com sucesso na segunda tentativa")
-          await fetchAndSetUserProfile(retryResult.data.session.user.id)
-          return true
-        }
-
-        setUser(null)
-        return false
-      }
-
-      if (data.session) {
-        console.log("Sessão atualizada com sucesso")
-        await fetchAndSetUserProfile(data.session.user.id)
-        return true
-      }
-
-      console.log("Sessão não encontrada após atualização")
-      setUser(null)
-      return false
-    } catch (error) {
-      console.error("Erro ao atualizar sessão:", error)
-      return false
-    }
-  }
-
-  // Modificado para verificar se o usuário está logado antes de tentar atualizar a sessão
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        // Só tenta atualizar a sessão se houver um usuário logado
-        if (user) {
-          console.log("Página voltou a ficar visível, verificando sessão...")
-          refreshSession()
-        }
-      }
-    }
-
-    document.addEventListener("visibilitychange", handleVisibilityChange)
-
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange)
-    }
-  }, [user]) // Adicionado user como dependência
-
   return (
-    <AuthContext.Provider
-      value={{ user, isLoading, login, register, logout, updateUser, refreshSession: refreshSession }}
-    >
+    <AuthContext.Provider value={{ user, isLoading, login, register, logout, updateUser, refreshSession }}>
       {children}
     </AuthContext.Provider>
   )

@@ -1,96 +1,122 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { DashboardPage } from "@/components/dashboard-page"
 import { useAuth } from "@/lib/auth-context"
 import { Loader2 } from "lucide-react"
-import { supabase } from "@/lib/supabaseClient"
+import { cache } from "@/lib/cache"
+import { supabase } from "@/lib/supabase-client"
 
 export default function Dashboard() {
-  const { user, isLoading, refreshSession } = useAuth()
+  const { user, isLoading } = useAuth()
   const router = useRouter()
   const [isRedirecting, setIsRedirecting] = useState(false)
-  const [isCheckingSession, setIsCheckingSession] = useState(true)
+  const [isCheckingSession, setIsCheckingSession] = useState(false)
+  const sessionCheckTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const hasCheckedSessionRef = useRef(false)
+  const isMountedRef = useRef(true)
 
   useEffect(() => {
-    // Verificar se há uma sessão ativa
+    // Marcar componente como montado
+    isMountedRef.current = true
+
+    // Função para verificar a sessão
     async function checkSession() {
+      // Se já verificamos a sessão ou estamos carregando, não verificar novamente
+      if (hasCheckedSessionRef.current || isLoading) {
+        return
+      }
+
       try {
-        setIsCheckingSession(true)
+        if (isMountedRef.current) {
+          setIsCheckingSession(true)
+        }
+        hasCheckedSessionRef.current = true
 
-        // Verificar se há uma sessão no Supabase
-        const { data, error } = await supabase.auth.getSession()
-
-        if (error) {
-          console.error("Erro ao verificar sessão:", error)
-          throw error
+        // Verificar cache primeiro
+        const cachedUserId = cache.get<string>("currentUserId")
+        if (cachedUserId) {
+          console.log("Sessão encontrada no cache")
+          if (isMountedRef.current) {
+            setIsCheckingSession(false)
+          }
+          return
         }
 
-        // Se não houver sessão, tentar recuperar de cookies ou localStorage
+        // Configurar um timeout para evitar carregamento infinito
+        sessionCheckTimeoutRef.current = setTimeout(() => {
+          if (isMountedRef.current) {
+            console.log("Timeout de verificação de sessão atingido")
+            setIsCheckingSession(false)
+            router.push("/")
+          }
+        }, 5000) // Reduzido para 5 segundos
+
+        // Se não estiver em cache, verificar se há uma sessão no Supabase
+        const { data } = await supabase.auth.getSession()
+
+        // Limpar o timeout
+        if (sessionCheckTimeoutRef.current) {
+          clearTimeout(sessionCheckTimeoutRef.current)
+          sessionCheckTimeoutRef.current = null
+        }
+
+        // Se não houver sessão, redirecionar para login
         if (!data.session) {
-          console.log("Nenhuma sessão encontrada, tentando recuperar de armazenamento local...")
-
-          // Tentar refresh automático uma vez antes de redirecionar
-          const refreshed = await refreshSession()
-
-          if (!refreshed) {
-            console.log("Falha ao recuperar sessão, tentando uma última vez...")
-
-            // Espera um pouco e tenta novamente
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-            const secondAttempt = await refreshSession()
-
-            if (!secondAttempt) {
-              console.log("Falha definitiva, redirecionando para login")
-              setIsRedirecting(true)
-              router.push("/")
-              return
-            } else {
-              console.log("Sessão recuperada na segunda tentativa")
-            }
-          } else {
-            console.log("Sessão recuperada com sucesso")
+          console.log("Nenhuma sessão encontrada, redirecionando para login")
+          if (isMountedRef.current) {
+            setIsRedirecting(true)
+            router.push("/")
           }
+          return
         }
 
-        // Se houver uma sessão mas não houver usuário no contexto, tenta atualizar
-        if (data.session && !user) {
-          console.log("Sessão encontrada, mas usuário não está no contexto. Atualizando sessão...")
-          const refreshed = await refreshSession()
+        // Se chegou aqui, temos uma sessão válida
+        // Armazenar em cache
+        cache.set("currentUserId", data.session.user.id, 30 * 60 * 1000)
 
-          if (!refreshed) {
-            console.log("Falha ao atualizar sessão, tentando uma última vez...")
-
-            // Espera um pouco e tenta novamente
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-            const secondAttempt = await refreshSession()
-
-            if (!secondAttempt) {
-              console.log("Falha definitiva, redirecionando para login")
-              setIsRedirecting(true)
-              router.push("/")
-              return
-            }
-          }
+        if (isMountedRef.current) {
+          setIsCheckingSession(false)
         }
       } catch (error) {
         console.error("Erro ao verificar sessão:", error)
-        setIsRedirecting(true)
-        router.push("/")
+        if (isMountedRef.current) {
+          setIsRedirecting(true)
+          router.push("/")
+        }
       } finally {
-        setIsCheckingSession(false)
+        // Limpar o timeout se ainda existir
+        if (sessionCheckTimeoutRef.current) {
+          clearTimeout(sessionCheckTimeoutRef.current)
+          sessionCheckTimeoutRef.current = null
+        }
+        if (isMountedRef.current) {
+          setIsCheckingSession(false)
+        }
       }
     }
 
-    if (!isLoading) {
-      if (!user) {
-        checkSession()
-      } else {
-        setIsCheckingSession(false)
+    // Só verificar a sessão se não tivermos usuário e não estivermos carregando
+    if (!user && !isLoading && !hasCheckedSessionRef.current) {
+      checkSession()
+    } else if (user) {
+      // Se temos usuário, não precisamos verificar a sessão
+      setIsCheckingSession(false)
+      hasCheckedSessionRef.current = true
+    }
+
+    // Limpar o timeout quando o componente for desmontado
+    return () => {
+      // Marcar componente como desmontado
+      isMountedRef.current = false
+
+      if (sessionCheckTimeoutRef.current) {
+        clearTimeout(sessionCheckTimeoutRef.current)
+        sessionCheckTimeoutRef.current = null
       }
     }
-  }, [user, isLoading, router, refreshSession])
+  }, [user, isLoading, router])
 
   // Se estiver verificando a sessão ou redirecionando, mostrar tela de carregamento
   if (isLoading || isRedirecting || isCheckingSession) {

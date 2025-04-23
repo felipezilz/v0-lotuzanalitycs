@@ -531,8 +531,8 @@ export function ProductDetailPage({ productId }: { productId: string }) {
   // Modifique o useEffect que lida com a visibilidade da página
   useEffect(() => {
     const handleVisibilityChange = async () => {
-      if (document.visibilityState === "visible" && user && sessionChecked) {
-        console.log("Página voltou a ficar visível, verificando sessão...")
+      if (document.visibilityState === "visible") {
+        console.log("Página de produto voltou a ficar visível, verificando sessão...")
 
         // Tenta atualizar a sessão primeiro
         try {
@@ -540,42 +540,55 @@ export function ProductDetailPage({ productId }: { productId: string }) {
 
           // Só recarrega os dados se a sessão for válida
           if (sessionValid) {
-            console.log("Sessão válida, recarregando dados...")
+            console.log("Sessão válida, recarregando dados do produto...")
             loadProduct(true) // Força o recarregamento
           } else {
-            console.log("Sessão inválida ou expirada")
-            // Tenta uma última vez antes de redirecionar
+            console.log("Sessão inválida ou expirada, tentando recuperar...")
+
+            // Espera um pouco e tenta novamente com mais persistência
+            await new Promise((resolve) => setTimeout(resolve, 2000))
             const retrySession = await refreshSession()
+
             if (retrySession) {
               console.log("Sessão recuperada na segunda tentativa, recarregando dados...")
               loadProduct(true)
             } else {
-              console.log("Falha definitiva na sessão, redirecionando...")
-              toast({
-                title: "Sessão expirada",
-                description: "Sua sessão expirou. Por favor, faça login novamente.",
-                variant: "destructive",
-              })
-              router.push("/")
+              // Última tentativa antes de desistir
+              await new Promise((resolve) => setTimeout(resolve, 3000))
+              const finalAttempt = await refreshSession()
+
+              if (finalAttempt) {
+                console.log("Sessão recuperada na tentativa final, recarregando dados...")
+                loadProduct(true)
+              } else {
+                console.log("Não foi possível recuperar a sessão após múltiplas tentativas")
+                // Não redirecionar imediatamente, mostrar um toast e permitir que o usuário tente manualmente
+                toast({
+                  title: "Problemas de conexão",
+                  description: "Houve um problema com sua sessão. Tente recarregar a página.",
+                  action: (
+                    <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
+                      Recarregar
+                    </Button>
+                  ),
+                  duration: 10000, // 10 segundos
+                })
+              }
             }
           }
         } catch (error) {
           console.error("Erro ao verificar sessão após retorno à página:", error)
           toast({
             title: "Erro de conexão",
-            description: "Ocorreu um erro ao reconectar. Tentando novamente...",
+            description: "Ocorreu um erro ao reconectar. Tente recarregar a página.",
             variant: "destructive",
+            action: (
+              <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
+                Recarregar
+              </Button>
+            ),
+            duration: 10000, // 10 segundos
           })
-
-          // Tenta uma última vez após um pequeno atraso
-          setTimeout(async () => {
-            const finalAttempt = await refreshSession()
-            if (finalAttempt) {
-              loadProduct(true)
-            } else {
-              router.push("/")
-            }
-          }, 2000)
         }
       }
     }
@@ -587,7 +600,7 @@ export function ProductDetailPage({ productId }: { productId: string }) {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
-  }, [loadProduct, refreshSession, user, sessionChecked, router, toast])
+  }, [loadProduct, refreshSession, toast])
 
   // Vamos ajustar a função calculateStats para calcular corretamente os custos físicos
   // quando eles são definidos como percentual do faturamento

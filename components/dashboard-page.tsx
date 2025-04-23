@@ -1,9 +1,8 @@
 "use client"
 
-import { useEffect, useState, useCallback, useMemo } from "react"
+import { useEffect, useState, useCallback, useMemo, useRef } from "react"
 import Image from "next/image"
 import { Plus, ArrowUpIcon, ArrowDownIcon, RefreshCw, Filter, LayoutDashboard, BarChart3 } from "lucide-react"
-import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from "chart.js"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
@@ -17,14 +16,14 @@ import { useAuth } from "@/lib/auth-context"
 import { MainNav } from "@/components/main-nav"
 import { useToast } from "@/components/ui/use-toast"
 import { ProductCardSkeleton } from "@/components/product-card-skeleton"
-import { PerformanceComparisonChart } from "@/components/performance-comparison-chart"
 import { Skeleton } from "@/components/ui/skeleton"
 
 // Register ChartJS components
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from "chart.js"
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend)
 
 export function DashboardPage() {
-  const { user, refreshSession } = useAuth()
+  const { user } = useAuth()
   const { toast } = useToast()
   const [products, setProducts] = useState<Product[]>([])
   const [isAddProductOpen, setIsAddProductOpen] = useState(false)
@@ -45,12 +44,17 @@ export function DashboardPage() {
   const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(false)
   const [isLoadingInitial, setIsLoadingInitial] = useState(true)
   const [activeView, setActiveView] = useState<string>("grid")
+  const loadingTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const isMountedRef = useRef(true)
 
   // Função para carregar produtos - definida com useCallback para evitar recriações desnecessárias
   const fetchProducts = useCallback(
     async (force = false) => {
-      // Não tenta carregar se não houver usuário
-      if (!user) return
+      // Não tenta carregar se não houver usuário ou componente desmontado
+      if (!user || !isMountedRef.current) {
+        setIsLoadingInitial(false)
+        return
+      }
 
       // Evita carregamentos duplicados
       if (isLoading && !force) return
@@ -59,59 +63,106 @@ export function DashboardPage() {
       setIsLoading(true)
       setLoadError(null)
 
+      // Configurar um timeout para garantir que o estado de carregamento não fique preso
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current)
+      }
+
+      loadingTimeoutRef.current = setTimeout(() => {
+        if (isMountedRef.current) {
+          console.log("Timeout de carregamento atingido, resetando estado")
+          setIsLoading(false)
+          setIsLoadingInitial(false)
+          setLoadError("Tempo limite excedido ao carregar produtos. Tente novamente.")
+
+          toast({
+            title: "Erro",
+            description: "Tempo limite excedido ao carregar produtos. Tente novamente.",
+            variant: "destructive",
+          })
+        }
+      }, 15000) // 15 segundos de timeout
+
       try {
         console.log("Iniciando carregamento de produtos...")
         const loadedProducts = await getProducts()
         console.log("Produtos carregados:", loadedProducts.length)
 
-        // Atualiza o estado com os produtos carregados
-        setProducts(loadedProducts)
-        setHasInitiallyLoaded(true)
+        // Limpar o timeout já que carregou com sucesso
+        if (loadingTimeoutRef.current) {
+          clearTimeout(loadingTimeoutRef.current)
+          loadingTimeoutRef.current = null
+        }
+
+        // Só atualiza o estado se o componente ainda estiver montado
+        if (isMountedRef.current) {
+          // Atualiza o estado com os produtos carregados
+          setProducts(loadedProducts)
+          setHasInitiallyLoaded(true)
+        }
       } catch (error) {
         console.error("Erro ao carregar produtos:", error)
-        setLoadError("Não foi possível carregar os produtos. Tente novamente.")
 
-        toast({
-          title: "Erro",
-          description: "Não foi possível carregar os produtos. Tente novamente.",
-          variant: "destructive",
-        })
+        // Só atualiza o estado se o componente ainda estiver montado
+        if (isMountedRef.current) {
+          setLoadError("Não foi possível carregar os produtos. Tente novamente.")
+
+          toast({
+            title: "Erro",
+            description: "Não foi possível carregar os produtos. Tente novamente.",
+            variant: "destructive",
+          })
+        }
       } finally {
-        // Sempre finaliza o carregamento, independentemente do resultado
-        setIsLoading(false)
-        setIsLoadingInitial(false)
+        // Limpar o timeout se ainda existir
+        if (loadingTimeoutRef.current) {
+          clearTimeout(loadingTimeoutRef.current)
+          loadingTimeoutRef.current = null
+        }
+
+        // Só atualiza o estado se o componente ainda estiver montado
+        if (isMountedRef.current) {
+          // Sempre finaliza o carregamento, independentemente do resultado
+          setIsLoading(false)
+          setIsLoadingInitial(false)
+        }
       }
     },
-    [user, toast],
+    [user, toast, isLoading],
   )
+
+  // Limpar o timeout quando o componente for desmontado
+  useEffect(() => {
+    // Marcar componente como montado
+    isMountedRef.current = true
+
+    return () => {
+      // Marcar componente como desmontado
+      isMountedRef.current = false
+
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current)
+        loadingTimeoutRef.current = null
+      }
+    }
+  }, [])
 
   // Carrega produtos apenas uma vez quando o componente é montado e o usuário está disponível
   useEffect(() => {
     if (!hasInitiallyLoaded && user) {
       fetchProducts()
-    } else {
-      // Se já carregou ou não tem usuário, apenas marca como não carregando inicialmente
+    } else if (!user) {
+      // Se não tem usuário, apenas marca como não carregando inicialmente
       setIsLoadingInitial(false)
     }
   }, [user, fetchProducts, hasInitiallyLoaded])
 
-  // Modificado para usar refreshSession antes de recarregar os dados
+  // Modificado para recarregar dados quando a página fica visível
   useEffect(() => {
-    const handleVisibilityChange = async () => {
-      if (document.visibilityState === "visible" && user) {
-        console.log("Dashboard: Página voltou a ficar visível, verificando sessão...")
-
-        // Tenta atualizar a sessão primeiro
-        const sessionValid = await refreshSession()
-
-        // Só recarrega os dados se a sessão for válida
-        if (sessionValid) {
-          console.log("Sessão válida, recarregando produtos...")
-          fetchProducts(true)
-        } else {
-          console.log("Sessão inválida ou expirada")
-          // Se a sessão não for válida, o usuário será redirecionado pelo AuthContext
-        }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && user && hasInitiallyLoaded) {
+        console.log("Dashboard: Página voltou a ficar visível, recarregando produtos...")
+        fetchProducts(true)
       }
     }
 
@@ -120,7 +171,7 @@ export function DashboardPage() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange)
     }
-  }, [fetchProducts, refreshSession, user])
+  }, [fetchProducts, user, hasInitiallyLoaded])
 
   // Calcula estatísticas quando os produtos ou o intervalo de datas mudam
   useEffect(() => {
@@ -229,6 +280,13 @@ export function DashboardPage() {
     }
   }, [stats.lucroTotal])
 
+  // Memoizar os cards de produtos para evitar re-renderizações desnecessárias
+  const productCards = useMemo(() => {
+    return products.map((product) => (
+      <ProductCard key={product.id} product={product} dateRange={dateRange} onDelete={handleProductDelete} />
+    ))
+  }, [products, dateRange, handleProductDelete])
+
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur">
@@ -250,7 +308,7 @@ export function DashboardPage() {
         <div className="container py-6">
           <div className="mb-6 sm:mb-8 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <div>
-              <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Dashboard de Performance</h2>
+              <h2 className="text-2xl sm:text-3xl font-bold tracking-tight">Dashboard</h2>
               <p className="mt-1 text-xs sm:text-sm text-muted-foreground">
                 Acompanhe o desempenho dos seus produtos e tome decisões baseadas em dados
               </p>
@@ -440,14 +498,7 @@ export function DashboardPage() {
 
               {activeView === "grid" ? (
                 <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {products.map((product) => (
-                    <ProductCard
-                      key={product.id}
-                      product={product}
-                      dateRange={dateRange}
-                      onDelete={handleProductDelete}
-                    />
-                  ))}
+                  {productCards}
                 </div>
               ) : (
                 <Card className="mb-8 border shadow-sm">
@@ -464,12 +515,6 @@ export function DashboardPage() {
                     </div>
                   </CardContent>
                 </Card>
-              )}
-
-              {products.length > 0 && (
-                <div className="mt-8">
-                  <PerformanceComparisonChart products={products} dateRange={dateRange} />
-                </div>
               )}
             </>
           ) : (

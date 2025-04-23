@@ -1,6 +1,7 @@
 import type { ProductDB, ProductDataDB } from "./supabase"
 import { type DateRange, isDateInRange } from "./date-utils"
 import { supabase } from "./supabaseClient"
+import { cache } from "./cache"
 
 // Tipos
 export type DailyData = {
@@ -56,31 +57,53 @@ function convertProductFromDB(product: ProductDB, productData: ProductDataDB[] =
   }
 }
 
-// Obter todos os produtos do usuário atual
+// Função otimizada para obter o ID do usuário atual
+async function getCurrentUserId(): Promise<string | null> {
+  // Verificar primeiro no cache
+  const cachedUserId = cache.get<string>("currentUserId")
+  if (cachedUserId) {
+    return cachedUserId
+  }
+
+  try {
+    // Se não estiver no cache, buscar da sessão
+    const { data } = await supabase.auth.getSession()
+    const userId = data?.session?.user?.id || null
+
+    // Armazenar no cache por 30 minutos
+    if (userId) {
+      cache.set("currentUserId", userId, 30 * 60 * 1000)
+    }
+
+    return userId
+  } catch (error) {
+    console.error("Erro ao obter ID do usuário:", error)
+    return null
+  }
+}
+
+// Obter todos os produtos do usuário atual - Otimizado com cache
 export async function getProducts(): Promise<Product[]> {
   try {
-    // Verificar se há uma sessão ativa
-    const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
-
-    if (sessionError) {
-      console.error("Erro ao verificar sessão:", sessionError)
-      throw new Error(`Erro ao verificar sessão: ${sessionError.message}`)
-    }
-
-    if (!sessionData.session) {
-      console.error("Nenhuma sessão ativa encontrada")
-      return []
-    }
-
-    const userId = sessionData.session.user.id
+    // Obter ID do usuário
+    const userId = await getCurrentUserId()
     if (!userId) {
-      console.error("ID do usuário não encontrado na sessão")
+      console.error("Nenhum usuário autenticado")
       return []
+    }
+
+    // Verificar cache
+    const cacheKey = `products_${userId}`
+    const cachedProducts = cache.get<Product[]>(cacheKey)
+
+    if (cachedProducts) {
+      console.log("Usando produtos do cache")
+      return cachedProducts
     }
 
     console.log("Buscando produtos para o usuário:", userId)
 
-    // Busca todos os produtos do usuário atual
+    // Buscar produtos do banco
     const { data: products, error } = await supabase
       .from("products")
       .select("*")
@@ -89,7 +112,7 @@ export async function getProducts(): Promise<Product[]> {
 
     if (error) {
       console.error("Erro ao buscar produtos:", error)
-      throw new Error(`Erro ao buscar produtos: ${error.message}`)
+      return []
     }
 
     console.log("Produtos encontrados:", products?.length || 0)
@@ -98,9 +121,17 @@ export async function getProducts(): Promise<Product[]> {
       return []
     }
 
-    // Para cada produto, busca seus dados diários
+    // Buscar dados dos produtos em paralelo
     const productsWithData = await Promise.all(
       products.map(async (product) => {
+        // Verificar cache para dados do produto
+        const productCacheKey = `product_data_${product.id}`
+        const cachedProductData = cache.get<ProductDataDB[]>(productCacheKey)
+
+        if (cachedProductData) {
+          return convertProductFromDB(product, cachedProductData)
+        }
+
         try {
           const { data: productData, error: dataError } = await supabase
             .from("product_data")
@@ -113,6 +144,11 @@ export async function getProducts(): Promise<Product[]> {
             return convertProductFromDB(product)
           }
 
+          // Armazenar dados do produto no cache
+          if (productData) {
+            cache.set(productCacheKey, productData, 5 * 60 * 1000) // 5 minutos
+          }
+
           return convertProductFromDB(product, productData || [])
         } catch (error) {
           console.error(`Erro ao processar produto ${product.id}:`, error)
@@ -121,114 +157,85 @@ export async function getProducts(): Promise<Product[]> {
       }),
     )
 
+    // Armazenar produtos completos no cache
+    cache.set(cacheKey, productsWithData, 5 * 60 * 1000) // 5 minutos
+
     return productsWithData
   } catch (error) {
     console.error("Erro ao buscar produtos:", error)
-    throw error // Propaga o erro para ser tratado pelo chamador
+    return []
   }
 }
 
-// Obter um único produto por ID
+// Obter um único produto por ID - Otimizado com cache
 export async function getProduct(id: string): Promise<Product | null> {
-  const MAX_RETRIES = 3
-  const RETRY_DELAY = 1000 // 1 segundo
+  try {
+    // Verificar cache
+    const cacheKey = `product_${id}`
+    const cachedProduct = cache.get<Product>(cacheKey)
 
-  let retries = 0
-
-  while (retries < MAX_RETRIES) {
-    try {
-      console.log(`Tentativa ${retries + 1} de buscar o produto com ID: ${id}`)
-
-      // Verificar se há uma sessão ativa
-      const { data: sessionData } = await supabase.auth.getSession()
-
-      if (!sessionData.session) {
-        console.error("Nenhuma sessão ativa encontrada")
-        return null
-      }
-
-      // Busca o produto pelo ID
-      const { data: product, error } = await supabase.from("products").select("*").eq("id", id).single()
-
-      if (error) {
-        console.error(`Erro ao buscar produto (tentativa ${retries + 1}):`, error)
-
-        // Se for um erro de conexão, tenta novamente
-        if (error.code === "PGRST301" || error.message.includes("Failed to fetch")) {
-          retries++
-          if (retries < MAX_RETRIES) {
-            console.log(`Aguardando ${RETRY_DELAY}ms antes da próxima tentativa...`)
-            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY * retries)) // Backoff exponencial
-            continue
-          }
-        }
-
-        return null
-      }
-
-      if (!product) {
-        console.error("Produto não encontrado com ID:", id)
-        return null
-      }
-
-      console.log("Produto encontrado:", product.name)
-
-      // Busca os dados diários do produto
-      const { data: productData, error: dataError } = await supabase
-        .from("product_data")
-        .select("*")
-        .eq("product_id", id)
-
-      if (dataError) {
-        console.error(`Erro ao buscar dados do produto ${id}:`, dataError)
-        // Retorna o produto mesmo sem dados
-        return convertProductFromDB(product, [])
-      }
-
-      console.log(`Encontrados ${productData?.length || 0} registros de dados para o produto`)
-
-      // Retorna o produto com os dados
-      return convertProductFromDB(product, productData || [])
-    } catch (error) {
-      console.error(`Erro ao buscar produto (tentativa ${retries + 1}):`, error)
-
-      // Incrementa o contador de tentativas
-      retries++
-
-      // Se ainda tiver tentativas, espera antes de tentar novamente
-      if (retries < MAX_RETRIES) {
-        console.log(`Aguardando ${RETRY_DELAY}ms antes da próxima tentativa...`)
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY * retries)) // Backoff exponencial
-      }
+    if (cachedProduct) {
+      console.log(`Usando produto ${id} do cache`)
+      return cachedProduct
     }
-  }
 
-  console.error(`Falha após ${MAX_RETRIES} tentativas de buscar o produto.`)
-  return null
+    console.log(`Buscando produto com ID: ${id}`)
+
+    // Verificar se o usuário está autenticado
+    const userId = await getCurrentUserId()
+    if (!userId) {
+      console.error("Nenhum usuário autenticado")
+      return null
+    }
+
+    // Buscar produto
+    const { data: product, error } = await supabase.from("products").select("*").eq("id", id).single()
+
+    if (error) {
+      console.error(`Erro ao buscar produto:`, error)
+      return null
+    }
+
+    if (!product) {
+      console.error("Produto não encontrado com ID:", id)
+      return null
+    }
+
+    console.log("Produto encontrado:", product.name)
+
+    // Buscar dados do produto
+    const { data: productData, error: dataError } = await supabase.from("product_data").select("*").eq("product_id", id)
+
+    if (dataError) {
+      console.error(`Erro ao buscar dados do produto ${id}:`, dataError)
+      return convertProductFromDB(product, [])
+    }
+
+    console.log(`Encontrados ${productData?.length || 0} registros de dados para o produto`)
+
+    // Converter e armazenar no cache
+    const convertedProduct = convertProductFromDB(product, productData || [])
+    cache.set(cacheKey, convertedProduct, 5 * 60 * 1000) // 5 minutos
+
+    return convertedProduct
+  } catch (error) {
+    console.error(`Erro ao buscar produto:`, error)
+    return null
+  }
 }
 
-// Função para salvar um novo produto
+// Função para salvar um novo produto - Limpa o cache após salvar
 export async function saveProduct(product: { nome: string; imagem: string }): Promise<Product | null> {
   try {
     console.log("Iniciando saveProduct com:", product.nome)
 
-    // 1. Verificar se há uma sessão ativa
-    const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
-
-    if (sessionError) {
-      console.error("Erro ao verificar sessão:", sessionError)
-      throw new Error(`Erro ao verificar sessão: ${sessionError.message}`)
-    }
-
-    if (!sessionData.session) {
-      console.error("Nenhuma sessão ativa encontrada")
+    // Obter ID do usuário
+    const userId = await getCurrentUserId()
+    if (!userId) {
       throw new Error("Usuário não autenticado")
     }
 
-    const userId = sessionData.session.user.id
-    console.log("Usuário autenticado:", userId)
-
-    // 2. Preparar dados para inserção
+    // Preparar dados para inserção
     const productData = {
       name: product.nome,
       image: product.imagem || "/placeholder.svg?height=200&width=200",
@@ -237,108 +244,67 @@ export async function saveProduct(product: { nome: string; imagem: string }): Pr
       updated_at: new Date().toISOString(),
     }
 
-    console.log("Dados preparados para inserção:", productData)
+    // Inserir produto
+    const { data, error } = await supabase.from("products").insert(productData).select().single()
 
-    // 3. Inserir o novo produto com timeout interno
-    const insertPromise = new Promise<Product>((resolve, reject) => {
-      supabase
-        .from("products")
-        .insert(productData)
-        .select()
-        .single()
-        .then(({ data, error }) => {
-          if (error) {
-            console.error("Erro ao inserir produto:", error)
+    if (error) {
+      console.error("Erro ao inserir produto:", error)
+      throw new Error(`Erro ao salvar produto: ${error.message}`)
+    }
 
-            // Verificar se é um erro de RLS
-            if (error.code === "42501" || error.message.includes("permission denied")) {
-              reject(new Error("Você não tem permissão para adicionar produtos"))
-            } else {
-              reject(new Error(`Erro ao salvar produto: ${error.message}`))
-            }
-            return
-          }
+    if (!data) {
+      throw new Error("Produto não foi criado")
+    }
 
-          if (!data) {
-            console.error("Produto não foi criado: retorno nulo")
-            reject(new Error("Produto não foi criado"))
-            return
-          }
+    console.log("Produto salvo com sucesso:", data.id)
 
-          console.log("Produto salvo com sucesso:", data.id)
+    // Limpar cache de produtos
+    cache.clear(`products_${userId}`)
 
-          // Converter para o formato da aplicação
-          resolve({
-            id: data.id,
-            nome: data.name,
-            imagem: data.image || "/placeholder.svg?height=200&width=200",
-            dados: [],
-            createdAt: data.created_at || new Date().toISOString(),
-          })
-        })
-        .catch((err) => {
-          console.error("Exceção ao inserir produto:", err)
-          reject(err)
-        })
-    })
+    // Converter para o formato da aplicação
+    const newProduct = {
+      id: data.id,
+      nome: data.name,
+      imagem: data.image || "/placeholder.svg?height=200&width=200",
+      dados: [],
+      createdAt: data.created_at || new Date().toISOString(),
+    }
 
-    // Definir um timeout interno para a operação
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error("Tempo limite excedido ao salvar produto no banco de dados"))
-      }, 8000) // 8 segundos
-    })
-
-    // Usar Promise.race para implementar o timeout
-    return await Promise.race([insertPromise, timeoutPromise])
+    return newProduct
   } catch (error) {
     console.error("Erro ao salvar produto:", error)
     throw error
   }
 }
 
-// Atualizar os dados de um produto existente
+// Atualizar os dados de um produto existente - Limpa o cache após atualizar
 export async function updateProductData(productId: string, date: string, data: DailyData): Promise<boolean> {
   try {
     console.log("Iniciando updateProductData para produto:", productId, "data:", date)
 
-    // Verificar se há uma sessão ativa
-    const { data: sessionData } = await supabase.auth.getSession()
-
-    if (!sessionData.session) {
-      console.error("Nenhuma sessão ativa encontrada")
+    // Verificar autenticação
+    const userId = await getCurrentUserId()
+    if (!userId) {
       return false
     }
 
-    // Certifique-se de que todos os valores são números
-    const investment = Number.parseFloat(data.investimento.toString()) || 0
-    const revenue = Number.parseFloat(data.faturamento.toString()) || 0
-    const visits = Number.parseInt(data.visitas.toString()) || 0
-    const clicks = Number.parseInt(data.cliques?.toString() || "0")
-    const impressions = Number.parseInt(data.impressoes?.toString() || "0")
-    const sales = Number.parseInt(data.vendas?.toString() || "0")
-    const initiateCheckout = Number.parseInt(data.initiateCheckout?.toString() || "0")
-
-    // Incluir todos os campos em uma única operação de upsert
+    // Preparar dados
     const baseData = {
       product_id: productId,
       date: date,
-      investment: investment,
-      revenue: revenue,
-      visits: visits,
-      clicks: clicks,
-      impressions: impressions,
-      sales: sales,
-      initiate_checkout: initiateCheckout,
-      // Não incluímos os campos calculados (profit, roi, cpa) pois são calculados pelo trigger
+      investment: Number.parseFloat(data.investimento.toString()) || 0,
+      revenue: Number.parseFloat(data.faturamento.toString()) || 0,
+      visits: Number.parseInt(data.visitas.toString()) || 0,
+      clicks: Number.parseInt(data.cliques?.toString() || "0"),
+      impressions: Number.parseInt(data.impressoes?.toString() || "0"),
+      sales: Number.parseInt(data.vendas?.toString() || "0"),
+      initiate_checkout: Number.parseInt(data.initiateCheckout?.toString() || "0"),
     }
 
-    console.log("Dados preparados para upsert:", baseData)
-
-    // Usar upsert para inserir ou atualizar em uma única operação
-    const { data: result, error } = await supabase.from("product_data").upsert(baseData, {
+    // Atualizar dados
+    const { error } = await supabase.from("product_data").upsert(baseData, {
       onConflict: "product_id,date",
-      returning: "minimal", // Não precisamos dos dados de retorno
+      returning: "minimal",
     })
 
     if (error) {
@@ -346,7 +312,12 @@ export async function updateProductData(productId: string, date: string, data: D
       return false
     }
 
-    console.log("Dados atualizados com sucesso no banco de dados")
+    // Limpar caches relacionados
+    cache.clear(`products_${userId}`)
+    cache.clear(`product_${productId}`)
+    cache.clear(`product_data_${productId}`)
+
+    console.log("Dados atualizados com sucesso")
     return true
   } catch (error) {
     console.error("Exceção ao atualizar dados do produto:", error)
@@ -354,20 +325,16 @@ export async function updateProductData(productId: string, date: string, data: D
   }
 }
 
-// Excluir um produto
+// Excluir um produto - Limpa o cache após excluir
 export async function deleteProduct(productId: string): Promise<boolean> {
   try {
-    // Verificar se há uma sessão ativa
-    const { data: sessionData } = await supabase.auth.getSession()
-
-    if (!sessionData.session) {
-      console.error("Nenhuma sessão ativa encontrada")
+    // Verificar autenticação
+    const userId = await getCurrentUserId()
+    if (!userId) {
       return false
     }
 
-    const userId = sessionData.session.user.id
-
-    // Primeiro, exclui todos os dados relacionados ao produto
+    // Excluir dados do produto
     const { error: dataError } = await supabase.from("product_data").delete().eq("product_id", productId)
 
     if (dataError) {
@@ -375,13 +342,18 @@ export async function deleteProduct(productId: string): Promise<boolean> {
       return false
     }
 
-    // Em seguida, exclui o produto
-    const { error } = await supabase.from("products").delete().eq("id", productId).eq("user_id", userId) // Garante que apenas o proprietário pode excluir
+    // Excluir produto
+    const { error } = await supabase.from("products").delete().eq("id", productId).eq("user_id", userId)
 
     if (error) {
       console.error("Erro ao excluir produto:", error)
       return false
     }
+
+    // Limpar caches relacionados
+    cache.clear(`products_${userId}`)
+    cache.clear(`product_${productId}`)
+    cache.clear(`product_data_${productId}`)
 
     console.log("Produto excluído com sucesso:", productId)
     return true
