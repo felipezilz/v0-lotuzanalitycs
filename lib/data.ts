@@ -157,8 +157,9 @@ export async function getProducts(): Promise<Product[]> {
       }),
     )
 
-    // Armazenar produtos completos no cache
-    cache.set(cacheKey, productsWithData, 5 * 60 * 1000) // 5 minutos
+    // Ajuste os tempos de cache para aproveitar melhor o desempenho do banco
+    // Você pode reduzir um pouco já que o banco está mais rápido
+    cache.set(cacheKey, productsWithData, 10 * 60 * 1000) // Aumentar de 5 para 10 minutos
 
     return productsWithData
   } catch (error) {
@@ -321,6 +322,44 @@ export async function updateProductData(productId: string, date: string, data: D
     return true
   } catch (error) {
     console.error("Exceção ao atualizar dados do produto:", error)
+    return false
+  }
+}
+
+// Adicionar esta nova função para atualizar a imagem do produto
+export async function updateProductImage(productId: string, imageUrl: string): Promise<boolean> {
+  try {
+    console.log("Iniciando updateProductImage para produto:", productId)
+
+    // Verificar autenticação
+    const userId = await getCurrentUserId()
+    if (!userId) {
+      return false
+    }
+
+    // Atualizar imagem do produto
+    const { error } = await supabase
+      .from("products")
+      .update({
+        image: imageUrl,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", productId)
+      .eq("user_id", userId)
+
+    if (error) {
+      console.error("Erro ao atualizar imagem do produto:", error)
+      return false
+    }
+
+    // Limpar caches relacionados
+    cache.clear(`products_${userId}`)
+    cache.clear(`product_${productId}`)
+
+    console.log("Imagem do produto atualizada com sucesso")
+    return true
+  } catch (error) {
+    console.error("Exceção ao atualizar imagem do produto:", error)
     return false
   }
 }

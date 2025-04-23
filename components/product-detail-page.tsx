@@ -35,6 +35,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Info,
+  ImagePlus,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
@@ -71,6 +72,8 @@ import { Progress } from "@/components/ui/progress"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import type { DailyData } from "@/types"
+// Adicionar o import do componente UpdateProductImageModal
+import { UpdateProductImageModal } from "@/components/update-product-image-modal"
 
 // Registrar componentes do Chart.js
 ChartJS.register(
@@ -181,6 +184,42 @@ export function ProductDetailPage({ productId }: { productId: string }) {
     frete: { valor: 0, tipo: "fixo" },
     producao: { valor: 0, tipo: "fixo" },
   })
+
+  // Adicionar o estado para controlar o modal de atualização de imagem
+  const [isUpdateImageModalOpen, setIsUpdateImageModalOpen] = useState(false)
+
+  // Função para lidar com a atualização da imagem
+  const handleImageUpdated = (newImageUrl: string) => {
+    // Atualizar o produto localmente para refletir a nova imagem
+    setProduct((prev) => {
+      if (!prev) return null
+      return {
+        ...prev,
+        imagem: newImageUrl,
+      }
+    })
+
+    // Atualizar o cache
+    if (isDataCached && dataCache[productId]) {
+      setDataCache((prev) => {
+        const updatedCache = { ...prev }
+        updatedCache[productId] = {
+          ...updatedCache[productId],
+          product: {
+            ...updatedCache[productId].product,
+            imagem: newImageUrl,
+          },
+          timestamp: Date.now(),
+        }
+        return updatedCache
+      })
+    }
+
+    toast({
+      title: "Imagem atualizada",
+      description: "A imagem do produto foi atualizada com sucesso.",
+    })
+  }
 
   // Função para definir o período de tempo
   const handlePeriodChange = useCallback(
@@ -1758,12 +1797,22 @@ export function ProductDetailPage({ productId }: { productId: string }) {
             </Link>
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
               <div className="flex items-center gap-3">
-                <div className="h-12 w-12 sm:h-16 sm:w-16 overflow-hidden rounded-md">
+                {/* Substituir a div da imagem do produto por esta versão com hover e clique */}
+                <div className="relative h-12 w-12 sm:h-16 sm:w-16 overflow-hidden rounded-md group">
                   <img
                     src={product.imagem || "/placeholder.svg?height=200&width=200"}
                     alt={product.nome}
                     className="h-full w-full object-cover"
                   />
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="absolute bottom-0 right-0 h-6 w-6 rounded-full bg-background/80 p-1 opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+                    onClick={() => setIsUpdateImageModalOpen(true)}
+                  >
+                    <ImagePlus className="h-4 w-4" />
+                    <span className="sr-only">Atualizar imagem</span>
+                  </Button>
                 </div>
                 <div className="flex flex-col">
                   {isEditingName ? (
@@ -1841,7 +1890,7 @@ export function ProductDetailPage({ productId }: { productId: string }) {
                     }}
                   />
                   <Label htmlFor="product-type" className="text-sm">
-                    {isPhysicalProduct ? "Produto Físico" : "Produto Digital"}
+                    {isPhysicalProduct ? "Produto Físico" : "Produto Físico"}
                   </Label>
                 </div>
               </div>
@@ -2995,6 +3044,23 @@ export function ProductDetailPage({ productId }: { productId: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Modal de atualização de imagem */}
+      <UpdateProductImageModal
+        isOpen={isUpdateImageModalOpen}
+        onClose={() => setIsUpdateImageModalOpen(false)}
+        productId={productId}
+        onImageUpdated={handleImageUpdated}
+      />
+
+      {/* Modal de atualização de imagem */}
+      <UpdateProductImageModal
+        isOpen={isUpdateImageModalOpen}
+        onClose={() => setIsUpdateImageModalOpen(false)}
+        onSuccess={handleImageUpdated}
+        productId={product.id}
+        currentImage={product.imagem}
+      />
 
       {/* Modal de confirmação de exclusão */}
       <ConfirmationModal
