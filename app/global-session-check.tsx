@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from "react"
 import { useAuth } from "@/lib/auth-context"
-import { cache } from "@/lib/cache"
 
 export function GlobalSessionCheck() {
   const { refreshSession } = useAuth()
@@ -13,16 +12,18 @@ export function GlobalSessionCheck() {
     if (!hasCheckedRef.current) {
       hasCheckedRef.current = true
 
-      // Verificar cache primeiro
-      const cachedUserId = cache.get<string>("currentUserId")
-      if (cachedUserId) {
-        // Se temos um ID em cache, a sessão está ativa
-        console.log("Sessão global encontrada no cache")
-        return
-      }
+      // Usar um timeout para garantir que o componente está totalmente montado
+      const timer = setTimeout(() => {
+        try {
+          refreshSession().catch((err) => {
+            console.error("Erro ao verificar sessão global:", err)
+          })
+        } catch (error) {
+          console.error("Exceção ao verificar sessão global:", error)
+        }
+      }, 500)
 
-      // Se não estiver em cache, tentar refresh
-      refreshSession()
+      return () => clearTimeout(timer)
     }
   }, [refreshSession])
 

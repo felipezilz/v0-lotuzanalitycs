@@ -12,7 +12,8 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useToast } from "@/components/ui/use-toast"
-import { Loader2 } from "lucide-react"
+import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 
 export function LoginPage() {
   const [loginEmail, setLoginEmail] = useState("")
@@ -22,7 +23,9 @@ export function LoginPage() {
   const [registerPassword, setRegisterPassword] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [isCheckingAuth, setIsCheckingAuth] = useState(true)
-  const { login, register, user } = useAuth()
+  const [isTestingConnection, setIsTestingConnection] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState<{ success: boolean; message: string } | null>(null)
+  const { login, register, user, testConnection } = useAuth()
   const router = useRouter()
   const { toast } = useToast()
 
@@ -42,6 +45,35 @@ export function LoginPage() {
       router.push("/dashboard")
     }
   }, [user, router])
+
+  // Função para testar a conexão com o Supabase
+  const handleTestConnection = async () => {
+    setIsTestingConnection(true)
+    setConnectionStatus(null)
+
+    try {
+      const result = await testConnection()
+
+      if (result.success) {
+        setConnectionStatus({
+          success: true,
+          message: "Conexão com o servidor estabelecida com sucesso!",
+        })
+      } else {
+        setConnectionStatus({
+          success: false,
+          message: `Falha na conexão: ${result.error}`,
+        })
+      }
+    } catch (error) {
+      setConnectionStatus({
+        success: false,
+        message: "Erro ao testar conexão",
+      })
+    } finally {
+      setIsTestingConnection(false)
+    }
+  }
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -168,6 +200,28 @@ export function LoginPage() {
           className="mb-2"
         />
         <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100">Analytics</h1>
+      </div>
+
+      {/* Botão para testar conexão */}
+      <div className="w-full max-w-md mb-4">
+        <Button onClick={handleTestConnection} variant="outline" className="w-full" disabled={isTestingConnection}>
+          {isTestingConnection ? (
+            <>
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Testando conexão...
+            </>
+          ) : (
+            "Testar conexão com o servidor"
+          )}
+        </Button>
+
+        {connectionStatus && (
+          <Alert className="mt-2" variant={connectionStatus.success ? "default" : "destructive"}>
+            {connectionStatus.success ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
+            <AlertTitle>{connectionStatus.success ? "Sucesso" : "Erro"}</AlertTitle>
+            <AlertDescription>{connectionStatus.message}</AlertDescription>
+          </Alert>
+        )}
       </div>
 
       <Tabs defaultValue="login" className="w-full max-w-md">

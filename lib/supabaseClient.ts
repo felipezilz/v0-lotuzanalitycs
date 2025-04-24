@@ -1,65 +1,37 @@
 import { createClient } from "@supabase/supabase-js"
 
-// Verificar se as variáveis de ambiente estão definidas
+// Garantir que as variáveis de ambiente estejam disponíveis
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error("Variáveis de ambiente do Supabase não definidas:", {
-    url: supabaseUrl ? "definido" : "não definido",
-    key: supabaseAnonKey ? "definido" : "não definido",
-  })
+  console.error("ERRO CRÍTICO: Variáveis de ambiente do Supabase não definidas!")
 }
 
-// Configuração otimizada para balancear persistência e performance
+// Configuração simplificada para maior confiabilidade
 export const supabase = createClient(supabaseUrl || "", supabaseAnonKey || "", {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
-    detectSessionInUrl: true,
+    detectSessionInUrl: false, // Desativado para evitar problemas com redirecionamentos
     storageKey: "lotuz_analytics_auth",
-    // Simplificando o storage para usar apenas localStorage por padrão
-    // Isso melhora a performance mantendo a persistência
-  },
-  global: {
-    headers: {
-      "X-Client-Info": "lotuz-analytics-web",
-    },
-  },
-  realtime: {
-    params: {
-      eventsPerSecond: 10,
-    },
   },
 })
 
-console.log("Cliente Supabase inicializado com URL:", supabaseUrl)
+// Função para testar a conexão com o Supabase
+export async function testSupabaseConnection() {
+  try {
+    const { data, error } = await supabase.from("profiles").select("count").limit(1)
 
-// Função simplificada para verificar a sessão periodicamente
-// sem causar sobrecarga de requisições
-export function setupSessionHeartbeat(intervalMinutes = 20) {
-  if (typeof window === "undefined") return undefined
+    if (error) {
+      console.error("Erro ao conectar ao Supabase:", error.message)
+      return { success: false, error: error.message }
+    }
 
-  const intervalId = setInterval(
-    async () => {
-      try {
-        const { data } = await supabase.auth.getSession()
-        if (data?.session) {
-          // Só atualiza se estiver próximo de expirar (menos de 30 minutos)
-          const expiresAt = new Date(data.session.expires_at * 1000)
-          const now = new Date()
-          const minutesRemaining = Math.round((expiresAt.getTime() - now.getTime()) / (60 * 1000))
-
-          if (minutesRemaining < 30) {
-            await supabase.auth.refreshSession()
-          }
-        }
-      } catch (e) {
-        console.error("Erro no heartbeat da sessão:", e)
-      }
-    },
-    intervalMinutes * 60 * 1000,
-  )
-
-  return () => clearInterval(intervalId)
+    console.log("Conexão com Supabase estabelecida com sucesso")
+    return { success: true }
+  } catch (e) {
+    console.error("Exceção ao testar conexão com Supabase:", e)
+    return { success: false, error: String(e) }
+  }
 }
